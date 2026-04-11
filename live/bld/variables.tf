@@ -5,7 +5,3 @@ variable "project_id" {
 variable "region" {
   type = string
 }
-
-variable "terraform_service_account" {
-  type = string
-}
