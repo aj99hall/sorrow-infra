@@ -1,0 +1,193 @@
+name: Terraform GCP
+
+on:
+  pull_request:
+    paths:
+      - "live/**"
+      - "modules/**"
+      - "envs/**"
+      - ".github/workflows/terraform.yml"
+
+  push:
+    branches: ["main"]
+    paths:
+      - "live/**"
+      - "modules/**"
+      - "envs/**"
+      - ".github/workflows/terraform.yml"
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: terraform-bld-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_ROOT: live/bld
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+
+    outputs:
+      has_changes: ${{ steps.diff.outputs.changes }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: "projects/258083003066/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+          service_account: "terraform-dev@build-000.iam.gserviceaccount.com"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.3
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform -chdir=${TF_ROOT} init -backend-config=../../envs/bld/backend.hcl
+
+      - name: Terraform Fmt
+        run: terraform -chdir=${TF_ROOT} fmt -check -recursive
+
+      - name: Terraform Validate
+        run: terraform -chdir=${TF_ROOT} validate
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform -chdir=${TF_ROOT} plan \
+            -input=false \
+            -out=tfplan \
+            -var="project_id=build-000" \
+            -var="region=europe-west2" \
+            -var="terraform_service_account=terraform-dev@build-000.iam.gserviceaccount.com"
+
+          terraform -chdir=${TF_ROOT} show -json tfplan > plan.json
+
+      - name: Detect plan changes
+        id: diff
+        run: |
+          if jq -e '.resource_changes | length == 0' ${TF_ROOT}/plan.json > /dev/null; then
+            echo "changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate plan summary
+        if: github.event_name == 'pull_request'
+        run: |
+          ADDS=$(jq '[.resource_changes[] | select(.change.actions | index("create"))] | length' ${TF_ROOT}/plan.json)
+          UPDATES=$(jq '[.resource_changes[] | select(.change.actions | index("update"))] | length' ${TF_ROOT}/plan.json)
+          DELETES=$(jq '[.resource_changes[] | select(.change.actions | index("delete"))] | length' ${TF_ROOT}/plan.json)
+          REPLACES=$(jq '[.resource_changes[] | select((.change.actions | index("delete")) and (.change.actions | index("create")))] | length' ${TF_ROOT}/plan.json)
+
+          VM_RECREATION=$(jq '
+            [.resource_changes[]
+              | select(
+                  (.type == "google_compute_instance")
+                  and (.change.actions | index("delete"))
+                )
+            ] | length
+          ' ${TF_ROOT}/plan.json)
+
+          {
+            echo "### Terraform Plan Summary"
+            echo
+            echo "| Action | Count |"
+            echo "|-------:|------:|"
+            echo "| ➕ Create | $ADDS |"
+            echo "| ✏️ Update | $UPDATES |"
+            echo "| ❌ Delete | $DELETES |"
+            echo "| 🔁 Replace | $REPLACES |"
+            echo
+
+            if [ "$VM_RECREATION" -gt 0 ]; then
+              echo "🚨 **DANGER ZONE** 🚨"
+              echo
+              echo "**Compute Engine VM recreation detected.**"
+              echo
+              echo "- This will restart Airflow services"
+              echo "- SQLite metadata DB is at risk during restarts"
+              echo "- Scheduler downtime is expected"
+              echo
+            fi
+
+            echo "\`\`\`"
+            echo "${TF_ROOT}"
+            echo "\`\`\`"
+          } > summary.md
+
+      - name: Upload plan summary
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tf-plan-summary
+          path: summary.md
+
+      - name: Terraform Apply
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.diff.outputs.changes == 'true'
+        run: |
+          terraform -chdir=${TF_ROOT} apply \
+            -input=false \
+            -auto-approve \
+            tfplan
+
+  comment-plan:
+    if: github.event_name == 'pull_request'
+    needs: terraform
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Download plan summary
+        uses: actions/download-artifact@v4
+        with:
+          name: tf-plan-summary
+          path: .
+
+      - name: Comment or update Terraform plan on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('summary.md', 'utf8');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const marker = "### Terraform Plan Summary";
+            const existing = comments.find(c =>
+              c.user.type === "Bot" && c.body.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body
+              });
+            }
