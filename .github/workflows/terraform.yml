@@ -43,7 +43,7 @@ jobs:
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: "projects/258083003066/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+          workload_identity_provider: "projects/1081177416975/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
           service_account: "terraform-dev@build-000.iam.gserviceaccount.com"
 
       - name: Setup Terraform
@@ -71,7 +71,7 @@ jobs:
             -var="region=europe-west2" \
             -var="terraform_service_account=terraform-dev@build-000.iam.gserviceaccount.com"
 
-          terraform -chdir=${TF_ROOT} show -json tfplan > plan.json
+          terraform -chdir=${TF_ROOT} show -json tfplan > ${TF_ROOT}/plan.json
 
       - name: Detect plan changes
         id: diff
