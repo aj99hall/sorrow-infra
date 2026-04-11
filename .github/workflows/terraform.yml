@@ -9,7 +9,8 @@ on:
       - ".github/workflows/terraform.yml"
 
   push:
-    branches: ["main"]
+    branches:
+      - "main"
     paths:
       - "live/**"
       - "modules/**"
@@ -22,7 +23,7 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: terraform-bld-${{ github.event.pull_request.number || github.ref }}
+  group: terraform-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -30,11 +31,9 @@ env:
   TF_ROOT: live/bld
 
 jobs:
-  terraform:
+  plan:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-
-    outputs:
-      has_changes: ${{ steps.diff.outputs.changes }}
 
     steps:
       - name: Checkout
@@ -43,8 +42,8 @@ jobs:
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: "projects/1081177416975/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
-          service_account: "terraform-dev@build-000.iam.gserviceaccount.com"
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -62,35 +61,24 @@ jobs:
         run: terraform -chdir=${TF_ROOT} validate
 
       - name: Terraform Plan
-        id: plan
         run: |
           terraform -chdir=${TF_ROOT} plan \
             -input=false \
             -out=tfplan \
-            -var="project_id=build-000" \
-            -var="region=europe-west2"
+            -var="project_id=${{ vars.GCP_PROJECT_ID }}" \
+            -var="region=${{ vars.GCP_REGION }}"
 
           terraform -chdir=${TF_ROOT} show -json tfplan > ${TF_ROOT}/plan.json
 
-      - name: Detect plan changes
-        id: diff
-        run: |
-          if jq -e '.resource_changes | length == 0' ${TF_ROOT}/plan.json > /dev/null; then
-            echo "changes=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changes=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Generate plan summary
-        if: github.event_name == 'pull_request'
         run: |
-          ADDS=$(jq '[.resource_changes[] | select(.change.actions | index("create"))] | length' ${TF_ROOT}/plan.json)
-          UPDATES=$(jq '[.resource_changes[] | select(.change.actions | index("update"))] | length' ${TF_ROOT}/plan.json)
-          DELETES=$(jq '[.resource_changes[] | select(.change.actions | index("delete"))] | length' ${TF_ROOT}/plan.json)
-          REPLACES=$(jq '[.resource_changes[] | select((.change.actions | index("delete")) and (.change.actions | index("create")))] | length' ${TF_ROOT}/plan.json)
+          ADDS=$(jq '[(.resource_changes // [])[] | select(.change.actions | index("create"))] | length' ${TF_ROOT}/plan.json)
+          UPDATES=$(jq '[(.resource_changes // [])[] | select(.change.actions | index("update"))] | length' ${TF_ROOT}/plan.json)
+          DELETES=$(jq '[(.resource_changes // [])[] | select(.change.actions | index("delete"))] | length' ${TF_ROOT}/plan.json)
+          REPLACES=$(jq '[(.resource_changes // [])[] | select((.change.actions | index("delete")) and (.change.actions | index("create")))] | length' ${TF_ROOT}/plan.json)
 
           VM_RECREATION=$(jq '
-            [.resource_changes[]
+            [(.resource_changes // [])[]
               | select(
                   (.type == "google_compute_instance")
                   and (.change.actions | index("delete"))
@@ -126,23 +114,14 @@ jobs:
           } > summary.md
 
       - name: Upload plan summary
-        if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: tf-plan-summary
           path: summary.md
 
-      - name: Terraform Apply
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.diff.outputs.changes == 'true'
-        run: |
-          terraform -chdir=${TF_ROOT} apply \
-            -input=false \
-            -auto-approve \
-            tfplan
-
   comment-plan:
     if: github.event_name == 'pull_request'
-    needs: terraform
+    needs: plan
     runs-on: ubuntu-latest
 
     permissions:
@@ -190,3 +169,35 @@ jobs:
                 body
               });
             }
+
+  apply:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: bld
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.14.3
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform -chdir=${TF_ROOT} init -backend-config=../../envs/bld/backend.hcl
+
+      - name: Terraform Apply
+        run: |
+          terraform -chdir=${TF_ROOT} apply \
+            -input=false \
+            -auto-approve \
+            -var="project_id=${{ vars.GCP_PROJECT_ID }}" \
+            -var="region=${{ vars.GCP_REGION }}"
