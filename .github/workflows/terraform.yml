@@ -68,8 +68,7 @@ jobs:
             -input=false \
             -out=tfplan \
             -var="project_id=build-000" \
-            -var="region=europe-west2" \
-            -var="terraform_service_account=terraform-dev@build-000.iam.gserviceaccount.com"
+            -var="region=europe-west2"
 
           terraform -chdir=${TF_ROOT} show -json tfplan > ${TF_ROOT}/plan.json
 
