@@ -1,5 +1,5 @@
 data "google_project" "current" {
-  project_id = "build-000"
+  project_id = var.project_id
 }
 
 output "project_number" {
