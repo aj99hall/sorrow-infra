@@ -72,13 +72,13 @@ jobs:
 
       - name: Generate plan summary
         run: |
-          ADDS=$(jq '[.resource_changes[] | select(.change.actions | index("create"))] | length' ${TF_ROOT}/plan.json)
-          UPDATES=$(jq '[.resource_changes[] | select(.change.actions | index("update"))] | length' ${TF_ROOT}/plan.json)
-          DELETES=$(jq '[.resource_changes[] | select(.change.actions | index("delete"))] | length' ${TF_ROOT}/plan.json)
-          REPLACES=$(jq '[.resource_changes[] | select((.change.actions | index("delete")) and (.change.actions | index("create")))] | length' ${TF_ROOT}/plan.json)
+          ADDS=$(jq '[(.resource_changes // [])[] | select(.change.actions | index("create"))] | length' ${TF_ROOT}/plan.json)
+          UPDATES=$(jq '[(.resource_changes // [])[] | select(.change.actions | index("update"))] | length' ${TF_ROOT}/plan.json)
+          DELETES=$(jq '[(.resource_changes // [])[] | select(.change.actions | index("delete"))] | length' ${TF_ROOT}/plan.json)
+          REPLACES=$(jq '[(.resource_changes // [])[] | select((.change.actions | index("delete")) and (.change.actions | index("create")))] | length' ${TF_ROOT}/plan.json)
 
           VM_RECREATION=$(jq '
-            [.resource_changes[]
+            [(.resource_changes // [])[]
               | select(
                   (.type == "google_compute_instance")
                   and (.change.actions | index("delete"))
