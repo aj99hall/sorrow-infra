@@ -19,13 +19,13 @@ resource "google_bigquery_table" "table1" {
 ]
 EOF
 
-  dataset_id = google_bigquery_dataset.example.dataset_id
+  dataset_id = google_bigquery_dataset.rlsdemo.dataset_id
   table_id   = "table1"
 }
 
 resource "google_bigquery_row_access_policy" "rlspolicy_crim" {
-  dataset_id = google_bigquery_dataset.example.dataset_id
-  table_id   = google_bigquery_table.example.table_id
+  dataset_id = google_bigquery_dataset.rlsdemo.dataset_id
+  table_id   = google_bigquery_table.table1.table_id
   policy_id  = "rlspolicy_crim"
 
   filter_predicate = "criminal_record is not NULL"
